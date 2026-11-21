@@ -1,0 +1,369 @@
+import AppKit
+import ApplicationServices
+import AVFoundation
+import Carbon
+import ServiceManagement
+import Speech
+
+private struct PasteTarget {
+    let pid: pid_t
+    let field: AXUIElement?
+
+    init?() {
+        guard let application = NSWorkspace.shared.frontmostApplication,
+              application.processIdentifier != getpid() else { return nil }
+        pid = application.processIdentifier
+        field = Self.focusedField(pid)
+    }
+
+    private static func focusedField(_ pid: pid_t) -> AXUIElement? {
+        guard AXIsProcessTrusted() else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.15)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return (value as! AXUIElement)
+    }
+
+    func paste() -> Bool {
+        guard AXIsProcessTrusted(), NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+            return false
+        }
+        if let field {
+            guard let current = Self.focusedField(pid), CFEqual(field, current) else { return false }
+        }
+        let source = CGEventSource(stateID: .privateState)
+        guard let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false) else {
+            return false
+        }
+        down.flags = .maskCommand
+        up.flags = .maskCommand
+        down.postToPid(pid)
+        up.postToPid(pid)
+        return true
+    }
+}
+
+@MainActor
+final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private var menuItem: NSStatusItem?
+    private var hotkey: Hotkey?
+    private var settings: Settings?
+    private let overlay = Overlay()
+    private var microphone: Microphone?
+    private var transcription: Transcription?
+    private var activeID: UUID?
+    private var pasteTarget: PasteTarget?
+    private var limit: Task<Void, Never>?
+    private var released = false
+    private var earlyResult: String?
+    private var previewTask: Task<Void, Never>?
+    private var startSound: NSSound?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--preview") {
+            try? loadSettings()
+            showPreview(standalone: true)
+            return
+        }
+        menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hold to Dictate")
+        menuItem?.button?.toolTip = "Hold to Dictate"
+        let menu = NSMenu()
+        menu.delegate = self
+        menuItem?.menu = menu
+        reload()
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let shortcut = settings?.shortcut.uppercased().replacingOccurrences(of: "+", with: " + ") ?? "CMD + SHIFT + K"
+        let title = NSMenuItem(title: "Диктовка · \(shortcut)", action: nil, keyEquivalent: "")
+        title.isEnabled = false
+        menu.addItem(title)
+        menu.addItem(.separator())
+        add("Открыть настройки", #selector(openSettings), to: menu)
+        add("Применить настройки", #selector(reload), to: menu)
+        add("Показать превью", #selector(preview), to: menu)
+        add("Разрешения macOS", #selector(requestPermissions), to: menu)
+        let login = add("Запускать при входе", #selector(toggleLogin), to: menu)
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(.separator())
+        add("Выйти", #selector(quit), to: menu)
+    }
+
+    @discardableResult
+    private func add(_ title: String, _ action: Selector, to menu: NSMenu) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        menu.addItem(item)
+        return item
+    }
+
+    private func loadSettings() throws {
+        let newSettings = try Settings.load()
+        _ = try Shortcut(newSettings.shortcut)
+        settings = newSettings
+        overlay.appearance = newSettings.appearance
+    }
+
+    @objc private func openSettings() {
+        do { try Settings.openFile() } catch { overlay.fail("Не удалось открыть settings.json.") }
+    }
+
+    @objc private func reload() {
+        guard activeID == nil else { return }
+        do {
+            let previous = settings
+            try loadSettings()
+            guard hotkey == nil || previous?.shortcut.lowercased() != settings?.shortcut.lowercased(),
+                  let settings else { return }
+            hotkey?.invalidate()
+            hotkey = nil
+            do {
+                hotkey = try register(settings.shortcut)
+            } catch {
+                if let previous {
+                    hotkey = try? register(previous.shortcut)
+                    self.settings = previous
+                    overlay.appearance = previous.appearance
+                }
+                throw error
+            }
+        } catch {
+            overlay.fail(error is DictationError ? error.localizedDescription : "Проверьте формат settings.json.")
+        }
+    }
+
+    private func register(_ string: String) throws -> Hotkey {
+        try Hotkey(Shortcut(string)) { [weak self] pressed in
+            guard let self else { return }
+            if pressed { self.start() } else { self.finish() }
+        }
+    }
+
+    @objc private func requestPermissions() {
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] _ in
+                Task { @MainActor in self?.requestPermissions() }
+            }
+            return
+        }
+        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+            openPrivacy("Privacy_Microphone")
+            return
+        }
+        if settings?.engine == .onDevice && SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+            SFSpeechRecognizer.requestAuthorization { [weak self] _ in
+                Task { @MainActor in self?.requestPermissions() }
+            }
+            return
+        }
+        if settings?.engine == .onDevice && SFSpeechRecognizer.authorizationStatus() != .authorized {
+            openPrivacy("Privacy_SpeechRecognition")
+            return
+        }
+        if settings?.pasteAutomatically == true && !AXIsProcessTrusted() {
+            _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
+            openPrivacy("Privacy_Accessibility")
+        }
+    }
+
+    private func openPrivacy(_ anchor: String) {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func toggleLogin() {
+        do {
+            let service = SMAppService.mainApp
+            if service.status == .enabled { try service.unregister() } else { try service.register() }
+            if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
+        } catch {
+            overlay.fail("Не удалось изменить автозапуск.")
+        }
+    }
+
+    @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func preview() { showPreview(standalone: false) }
+
+    private func showPreview(standalone: Bool) {
+        guard activeID == nil else { return }
+        previewTask?.cancel()
+        overlay.show()
+        previewTask = Task { [weak self] in
+            guard let self else { return }
+            let phrases = [
+                "Раз, два, три.",
+                "Раз, два, три. Текст появляется прямо во время записи.",
+                "Раз, два, три. Текст появляется прямо во время записи. После отпускания клавиш он останется в буфере обмена и вставится в поле ввода."
+            ]
+            for step in 0..<100 {
+                guard !Task.isCancelled else { return }
+                self.overlay.display.level = 0.3 + 0.55 * abs(sin(Double(step) * 0.41))
+                self.overlay.update(text: phrases[min(2, step / 13)])
+                try? await Task.sleep(for: .milliseconds(65))
+            }
+            guard !Task.isCancelled else { return }
+            self.overlay.dismiss()
+            if standalone {
+                try? await Task.sleep(for: .milliseconds(450))
+                NSApp.terminate(nil)
+            }
+        }
+    }
+
+    private func start() {
+        guard activeID == nil, let settings else { return }
+        previewTask?.cancel()
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
+                Task { @MainActor in
+                    self?.overlay.fail(allowed ? "Микрофон разрешён. Удержите сочетание ещё раз." : "Разрешите доступ к микрофону в настройках macOS.")
+                }
+            }
+            return
+        case .authorized: break
+        default:
+            overlay.fail("Разрешите доступ к микрофону в настройках macOS.")
+            return
+        }
+
+        if settings.engine == .onDevice && SFSpeechRecognizer.authorizationStatus() != .authorized {
+            if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
+                SFSpeechRecognizer.requestAuthorization { [weak self] status in
+                    Task { @MainActor in
+                        self?.overlay.fail(status == .authorized
+                            ? "Распознавание разрешено. Удержите сочетание ещё раз."
+                            : "Разрешите распознавание речи в настройках macOS.")
+                    }
+                }
+            } else {
+                overlay.fail("Разрешите распознавание речи в настройках macOS.")
+            }
+            return
+        }
+
+        let id = UUID()
+        activeID = id
+        pasteTarget = PasteTarget()
+        released = false
+        earlyResult = nil
+        do {
+            let update: (String) -> Void = { [weak self] text in
+                guard let self, self.activeID == id else { return }
+                self.overlay.update(text: text)
+            }
+            let complete: (Result<String, Error>) -> Void = { [weak self] result in
+                guard let self, self.activeID == id else { return }
+                self.completed(result)
+            }
+            let capture = Microphone()
+            let provider: Transcription
+            switch settings.engine {
+            case .codex:
+                provider = try CodexTranscription(update: update, complete: complete)
+            case .onDevice:
+                provider = try DeviceTranscription(language: settings.language ?? Locale.current.identifier,
+                                                   update: update, complete: complete)
+            }
+            transcription = provider
+            microphone = capture
+            try capture.start(consume: provider.consume) { [weak self] level in
+                Task { @MainActor in
+                    guard let self, self.activeID == id, !self.released else { return }
+                    self.overlay.display.level = CGFloat(level)
+                }
+            }
+            overlay.show()
+            if settings.playSound { playSound(named: settings.startSound ?? "Tink") }
+            limit = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(240))
+                if !Task.isCancelled, self?.activeID == id {
+                    self?.completed(.failure(DictationError("Достигнут лимит в четыре минуты.")))
+                }
+            }
+        } catch {
+            completed(.failure(error))
+        }
+    }
+
+    private func playSound(named value: String) {
+        if value.hasPrefix("/") || value.hasPrefix("~/") {
+            let file = (value as NSString).expandingTildeInPath
+            startSound = NSSound(contentsOfFile: file, byReference: true)
+        } else {
+            startSound = NSSound(named: NSSound.Name(value))
+        }
+        startSound?.play()
+    }
+
+    private func finish() {
+        guard activeID != nil, !released else { return }
+        released = true
+        microphone?.stop()
+        overlay.finish()
+        if let earlyResult {
+            completed(.success(earlyResult))
+        } else {
+            transcription?.finish()
+        }
+    }
+
+    private func completed(_ result: Result<String, Error>) {
+        microphone?.stop()
+        if case let .success(text) = result, !released {
+            earlyResult = text
+            return
+        }
+
+        let target = pasteTarget
+        cleanUp()
+        switch result {
+        case let .success(text):
+            let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else {
+                overlay.fail("Речь не распознана.")
+                return
+            }
+            let clipboard = NSPasteboard.general
+            clipboard.clearContents()
+            guard clipboard.setString(text, forType: .string) else {
+                overlay.fail("Не удалось записать текст в буфер обмена.")
+                return
+            }
+            let pasted = settings?.pasteAutomatically == true && target?.paste() == true
+            overlay.dismiss(copied: !pasted)
+        case let .failure(error):
+            overlay.fail(error.localizedDescription)
+        }
+    }
+
+    private func cleanUp() {
+        activeID = nil
+        microphone?.stop()
+        transcription?.cancel()
+        limit?.cancel()
+        microphone = nil
+        transcription = nil
+        pasteTarget = nil
+        earlyResult = nil
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        cleanUp()
+        hotkey?.invalidate()
+    }
+}
+
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = DictationApp()
+    app.setActivationPolicy(.accessory)
+    app.delegate = delegate
+    withExtendedLifetime(delegate) { app.run() }
+}

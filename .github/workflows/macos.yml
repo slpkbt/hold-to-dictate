@@ -1,0 +1,44 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check shortcut, transcript and PCM
+        run: ./scripts/check.sh
+      - name: Build, sign and archive
+        run: ./scripts/release.sh
+      - name: Verify SHA-256
+        run: cd dist && shasum -a 256 -c *.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hold-to-dictate-macos
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: hold-to-dictate-macos
+          path: dist
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --verify-tag --notes-file RELEASE_NOTES.md

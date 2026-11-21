@@ -1,0 +1,18 @@
+{
+  "engine": "codex",
+  "shortcut": "cmd+shift+k",
+  "pasteAutomatically": true,
+  "playSound": true,
+  "startSound": "Tink",
+  "language": "ru-RU",
+  "appearance": {
+    "textColor": "#A8D9FF",
+    "backgroundOpacity": 0.86,
+    "width": 490,
+    "textSize": 16,
+    "maxLines": 6,
+    "verticalOffset": 68,
+    "horizontalOffset": 0,
+    "reduceMotion": false
+  }
+}
