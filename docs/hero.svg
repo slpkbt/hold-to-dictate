@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 310" width="1100" height="310" role="img" aria-labelledby="title">
+  <title id="title">Hold to Dictate</title>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#0f1d33"/>
+      <stop offset="1" stop-color="#09101c"/>
+    </linearGradient>
+    <linearGradient id="wave" x2="1" y2="0" gradientUnits="objectBoundingBox">
+      <stop stop-color="#67b5ff"/>
+      <stop offset=".5" stop-color="#9beeff"/>
+      <stop offset="1" stop-color="#4d85ff"/>
+    </linearGradient>
+    <linearGradient id="card" x2="1" y2="1" gradientUnits="objectBoundingBox">
+      <stop stop-color="#1a3550"/>
+      <stop offset="1" stop-color="#122338"/>
+    </linearGradient>
+    <radialGradient id="glow">
+      <stop stop-color="#286bd3" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#286bd3" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#719acf" stroke-width="1" opacity=".10"/>
+    </pattern>
+    <clipPath id="clip"><rect width="1100" height="310" rx="30"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#clip)">
+    <rect width="1100" height="310" fill="url(#background)"/>
+    <ellipse cx="868" cy="141" rx="397" ry="254" fill="url(#glow)"/>
+    <rect x="640" width="460" height="310" fill="url(#grid)"/>
+    <path d="M640 0v310" stroke="#263958"/>
+    <path d="M59 242h515" stroke="#253853"/>
+    <path d="M59 242h82" stroke="#83dfff" stroke-width="2" stroke-linecap="round"/>
+
+    <g transform="translate(60 67)">
+      <rect width="57" height="57" rx="16" fill="#162d47" stroke="#385875"/>
+      <path d="M15 28.5h5l3-8 6 17 5-23 5 14h5" fill="none" stroke="#96e7ff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="60" y="202" fill="#f1f7ff" font-size="67" font-weight="750" font-family="system-ui, 'Segoe UI', Arial, sans-serif" letter-spacing="-2.7">Hold to Dictate</text>
+
+    <g transform="translate(684 61)">
+      <rect x="15" y="16" width="342" height="188" rx="28" fill="#060d17" opacity=".65"/>
+      <rect width="342" height="188" rx="28" fill="url(#card)" stroke="#52799c"/>
+      <path d="M22 47h298M22 124h298" stroke="#52799c" opacity=".38"/>
+      <g fill="#6793b8">
+        <circle cx="24" cy="24" r="3.5"/><circle cx="36" cy="24" r="3.5"/><circle cx="48" cy="24" r="3.5"/>
+      </g>
+      <rect x="275" y="17" width="48" height="15" rx="7.5" fill="#113656" stroke="#4876a7"/>
+      <circle cx="286" cy="24.5" r="3" fill="#93edfb"/>
+      <path d="M295 24.5h17" stroke="#8bc7e8" stroke-width="2" stroke-linecap="round"/>
+      <path d="M25 87h35m226 0h32" stroke="#5482aa" stroke-width="2" stroke-linecap="round" opacity=".6"/>
+      <path d="M76 83v8m11-15v22m11-27v32m11-19v8m11-32v55m11-53v51m11-38v25m11-40v55m11-62v69m11-57v45m11-30v15m11-24v33m11-47v61m11-53v45m11-37v29m11-20v11m11-21v31m11-29v27m11-17v7" stroke="url(#wave)" stroke-width="3.5" stroke-linecap="round"/>
+      <path d="M26 145h189m-189 15h128" stroke="#82b2d5" stroke-width="3" stroke-linecap="round" opacity=".67"/>
+      <path d="M166 160h10" stroke="#9fddff" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="300" cy="154" r="17" fill="#193d52" stroke="#5db7c8"/>
+      <path d="m293 154 5 5 9-10" fill="none" stroke="#a3f3ed" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <rect x=".5" y=".5" width="1099" height="309" rx="29.5" fill="none" stroke="#3f5879"/>
+  </g>
+</svg>

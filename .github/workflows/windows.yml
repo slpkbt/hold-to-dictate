@@ -1,0 +1,42 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build, run packaged self-test and zip
+        shell: pwsh
+        run: ./scripts/build-windows.ps1 -Check
+      - name: Verify archive and checksum
+        shell: pwsh
+        run: |
+          $zip = 'dist/windows/HoldToDictate-windows-x64.zip'
+          $expected = (Get-Content "$zip.sha256").Split(' ')[0]
+          $actual = (Get-FileHash $zip -Algorithm SHA256).Hash
+          if ($actual -ne $expected) { throw 'ZIP checksum mismatch.' }
+          $verify = Join-Path $env:RUNNER_TEMP 'hold-to-dictate-extracted'
+          Expand-Archive -Path $zip -DestinationPath $verify
+          $exe = Join-Path $verify 'HoldToDictate.exe'
+          $process = Start-Process -FilePath $exe -ArgumentList '--self-test' -NoNewWindow -PassThru
+          if (-not $process.WaitForExit(30000)) { $process.Kill(); throw 'ZIP self-test timed out.' }
+          if ($process.ExitCode -ne 0) { throw "ZIP self-test failed: $($process.ExitCode)." }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hold-to-dictate-windows-x64
+          path: dist/windows/
+          if-no-files-found: error
