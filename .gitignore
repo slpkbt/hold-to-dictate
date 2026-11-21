@@ -2,3 +2,6 @@
 /build/
 /dist/
 .swiftpm/
+
+/windows/**/bin/
+/windows/**/obj/
