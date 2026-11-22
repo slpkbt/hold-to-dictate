@@ -4,6 +4,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 
 namespace HoldToDictate.WindowsApp;
@@ -20,9 +22,14 @@ internal sealed class Overlay : Window
     private readonly TextBlock label, caption;
     private readonly Rectangle[] wave = new Rectangle[24];
     private readonly double configuredWidth;
+    private readonly bool centered;
+    private readonly Border preview, root;
+    private int visualVersion;
+    private readonly System.Windows.Controls.Image previewImage;
 
-    public Overlay(Settings settings)
+    public Overlay(Settings settings, bool centered = false)
     {
+        this.centered = centered;
         configuredWidth = settings.OverlayWidth;
         SizeToContent = SizeToContent.Height;
         WindowStyle = WindowStyle.None;
@@ -36,6 +43,11 @@ internal sealed class Overlay : Window
         UseLayoutRounding = true;
         var accent = Theme.Color(settings.Accent);
         var box = new StackPanel();
+        previewImage = new System.Windows.Controls.Image { Stretch = Stretch.Uniform, MaxHeight = 160, MaxWidth = 250 };
+        preview = new Border { Child = previewImage, Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 12), Padding = new Thickness(4), Background = Theme.Card,
+            BorderBrush = Theme.Border, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(10) };
+        box.Children.Add(preview);
         label = new TextBlock { Foreground = accent, FontSize = 11, FontWeight = FontWeights.SemiBold };
         box.Children.Add(label);
         var meter = new StackPanel { Orientation = Orientation.Horizontal, Height = 22, Margin = new Thickness(0, 5, 0, 4) };
@@ -49,8 +61,9 @@ internal sealed class Overlay : Window
         caption = new TextBlock { Foreground = Theme.Text, FontSize = 16, TextWrapping = TextWrapping.Wrap,
             MaxHeight = 85, TextTrimming = TextTrimming.CharacterEllipsis };
         box.Children.Add(caption);
-        Content = new Border { Padding = new Thickness(17, 12, 17, 14), Child = box, CornerRadius = new CornerRadius(17),
+        root = new Border { Padding = new Thickness(17, 12, 17, 14), Child = box, CornerRadius = new CornerRadius(17),
             Background = Theme.Page, BorderBrush = Theme.Border, BorderThickness = new Thickness(1) };
+        Content = root;
         SourceInitialized += (_, _) =>
         {
             if (PresentationSource.FromVisual(this) is HwndSource source)
@@ -68,20 +81,63 @@ internal sealed class Overlay : Window
         return 0;
     }
 
+    public void SetPreview(byte[]? png)
+    {
+        if (png is null) { preview.Visibility = Visibility.Collapsed; previewImage.Source = null; return; }
+        using var stream = new MemoryStream(png);
+        var bitmap = new BitmapImage(); bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
+        bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
+        previewImage.Source = bitmap; preview.Visibility = Visibility.Visible;
+        if (SystemParameters.ClientAreaAnimation)
+            preview.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)));
+    }
+
+    public void SetWorking(bool working)
+    {
+        preview.BeginAnimation(OpacityProperty, null);
+        preview.Opacity = working ? 0.6 : 1;
+    }
+
     public void Status(string status) => label.Text = status;
     public void Render(string status, string text, int? level)
     {
+        ++visualVersion;
+        root.BeginAnimation(OpacityProperty, null);
+        root.Opacity = 1;
         Status(status);
         caption.Text = text.Length <= 420 ? text : "…" + text[^419..];
         if (level is not null) SetLevel(level.Value);
-        if (!IsVisible)
+        bool opening = !IsVisible;
+        var work = SystemParameters.WorkArea;
+        Width = Math.Min(configuredWidth, Math.Max(200, work.Width - 36));
+        if (opening) Show();
+        UpdateLayout();
+        Left = work.Left + (work.Width - Width) / 2;
+        Top = centered ? work.Top + Math.Max(8, (work.Height - ActualHeight) / 2)
+            : work.Top + Math.Max(8, work.Height - ActualHeight - 24);
+        if (opening && centered && SystemParameters.ClientAreaAnimation)
         {
-            var work = SystemParameters.WorkArea;
-            Width = Math.Min(configuredWidth, Math.Max(200, work.Width - 36));
-            Left = work.Left + (work.Width - Width) / 2;
-            Top = work.Top + Math.Max(8, work.Height - 155);
-            Show();
+            root.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)));
+            var rise = new TranslateTransform(); root.RenderTransform = rise;
+            rise.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(12, 0, TimeSpan.FromMilliseconds(180)));
         }
+    }
+
+    public void HideAnimated()
+    {
+        int version = ++visualVersion;
+        if (!IsVisible || !SystemParameters.ClientAreaAnimation)
+        {
+            Hide(); SetPreview(null); return;
+        }
+        var fade = new DoubleAnimation(root.Opacity, 0, TimeSpan.FromMilliseconds(150));
+        fade.Completed += (_, _) =>
+        {
+            if (version != visualVersion) return;
+            Hide(); SetPreview(null);
+            root.BeginAnimation(OpacityProperty, null); root.Opacity = 1;
+        };
+        root.BeginAnimation(OpacityProperty, fade);
     }
 
     public void SetLevel(int percent)
@@ -99,7 +155,8 @@ internal sealed class SettingsWindow : Window
 {
     private const string LoginKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string LoginName = "HoldToDictate";
-    private readonly TextBox shortcut, accent, width;
+    private readonly TextBox shortcut, accent, width, agentModel, codexExecutable;
+    private readonly ComboBox agentEffort;
     private readonly ComboBox engine, language;
     private readonly CheckBox paste, sound, login;
     private readonly TextBlock note;
@@ -122,6 +179,9 @@ internal sealed class SettingsWindow : Window
         try { languages = LocalRecognition.Languages(); }
         catch { languages = []; }
         language = new ComboBox { ItemsSource = new[] { "" }.Concat(languages).ToArray(), IsEditable = true, Text = current.Language };
+        agentModel = new TextBox { Text = current.AgentModel };
+        codexExecutable = new TextBox { Text = current.CodexExecutable };
+        agentEffort = new ComboBox { ItemsSource = new[] { "minimal", "low", "medium", "high", "xhigh", "max" }, SelectedItem = current.AgentReasoningEffort };
         accent = new TextBox { Text = current.Accent };
         width = new TextBox { Text = current.OverlayWidth.ToString(System.Globalization.CultureInfo.InvariantCulture) };
 
@@ -143,6 +203,9 @@ internal sealed class SettingsWindow : Window
         Field("Global shortcut", shortcut);
         Field("Recognition engine", engine);
         Field("Windows Speech language (blank = automatic)", language);
+        Field("Clipboard agent model", agentModel);
+        Field("Clipboard agent reasoning effort", agentEffort);
+        Field("Codex executable path (blank = automatic)", codexExecutable);
         Field("Overlay accent (#RRGGBB)", accent);
         Field("Overlay width (320–780)", width);
         paste = Check("Paste into the original field when safe (always copies)", current.PasteAutomatically);
@@ -152,10 +215,10 @@ internal sealed class SettingsWindow : Window
             Margin = new Thickness(0, 12, 0, 8) };
         panel.Children.Add(note);
         void Describe() => note.Text = engine.SelectedIndex == 1
-            ? "Codex uses your file-based ChatGPT sign-in and sends the microphone stream to chatgpt.com while dictating. The private protocol may change."
+            ? "Codex uses your file-based ChatGPT sign-in and sends voice to chatgpt.com. Ctrl+Shift+L also sends clipboard content. The private protocol may change."
             : languages.Length == 0
-                ? "No desktop speech recognizer found. Install Windows Speech for a supported language or opt in to Codex."
-                : "On-device recognition never sends your audio to the internet.";
+                ? "No desktop speech recognizer found. Install Windows Speech or choose Codex. Ctrl+Shift+L always sends voice and clipboard content to Codex."
+                : "On-device recognition keeps the main shortcut’s audio on this device. Ctrl+Shift+L always sends voice and clipboard content to Codex.";
         engine.SelectionChanged += (_, _) => { language.IsEnabled = engine.SelectedIndex == 0; Describe(); };
         language.IsEnabled = engine.SelectedIndex == 0;
         Describe();
@@ -182,6 +245,8 @@ internal sealed class SettingsWindow : Window
                 save(current with
                 {
                     Shortcut = shortcut.Text.Trim(), Engine = engine.SelectedIndex == 1 ? "codex" : "onDevice",
+                    AgentModel = agentModel.Text.Trim(), AgentReasoningEffort = (string)agentEffort.SelectedItem,
+                    CodexExecutable = codexExecutable.Text.Trim(),
                     Language = language.Text.Trim(), Accent = accent.Text.Trim(), OverlayWidth = parsedWidth,
                     PasteAutomatically = paste.IsChecked == true, PlaySound = sound.IsChecked == true,
                     StartAtLogin = login.IsChecked == true

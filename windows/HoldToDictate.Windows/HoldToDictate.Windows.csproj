@@ -10,6 +10,9 @@
     <AssemblyName>HoldToDictate</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <Content Include="../../Resources/clipboard-agent/*.txt" Link="clipboard-agent/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="System.Speech" Version="10.0.14" />
     <PackageReference Include="NAudio.WinMM" Version="2.2.1" />
   </ItemGroup>

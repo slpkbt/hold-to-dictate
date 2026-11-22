@@ -21,6 +21,7 @@ app="$scratch/Hold to Dictate.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$root/Resources/Info.plist" "$app/Contents/Info.plist"
 cp "$root/Resources/settings.json" "$app/Contents/Resources/settings.json"
+cp -R "$root/Resources/clipboard-agent" "$app/Contents/Resources/"
 
 compile() {
     xcrun swiftc -swift-version 5 -module-cache-path "$root/build/module-cache" -O -target "$1-apple-macos13.0" \

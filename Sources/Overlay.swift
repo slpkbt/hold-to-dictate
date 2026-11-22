@@ -7,14 +7,17 @@ final class DictationDisplay: ObservableObject {
 
     @Published var phase = Phase.listening
     @Published var text = ""
+    @Published var image: NSImage?
     @Published var status = "Слушаю…"
     @Published var level: CGFloat = 0
+    @Published var presented = true
 }
 
 private struct DictationView: View {
     @ObservedObject var display: DictationDisplay
     let width: CGFloat
     let height: CGFloat
+    let previewSize: CGSize
     let reducedMotion: Bool
     let appearance: Settings.Appearance?
 
@@ -27,6 +30,23 @@ private struct DictationView: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            if let image = display.image {
+                let working = display.phase == .finishing
+                let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: previewSize.width, height: previewSize.height)
+                    .background(.black.opacity(0.24))
+                    .clipShape(shape)
+                    .overlay { shape.strokeBorder(.white.opacity(0.26), lineWidth: 1) }
+                    .shadow(color: .black.opacity(0.22), radius: 5, y: 3)
+                    .scaleEffect(reducedMotion ? 1 : (working ? 0.94 : (display.presented ? 1 : 0.96)))
+                    .opacity(working ? 0.74 : 1)
+                    .offset(y: reducedMotion || display.presented ? 0 : 26)
+                    .animation(reducedMotion ? nil : .spring(response: 0.38, dampingFraction: 0.89), value: display.presented)
+                    .accessibilityLabel("Изображение из буфера обмена")
+            }
             HStack(spacing: 10) {
                 Group {
                     switch display.phase {
@@ -81,6 +101,7 @@ private struct DictationView: View {
         .animation(reducedMotion ? nil : .easeOut(duration: 0.18), value: display.text.isEmpty)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(8)
+        .environment(\.colorScheme, .dark)
         .accessibilityElement(children: .contain)
     }
 
@@ -112,19 +133,26 @@ final class Overlay {
     private var host: NSHostingView<DictationView>?
     private var screenFrame = CGRect.zero
     private var hideWork: DispatchWorkItem?
+    private var clipboard = false
+    private var presentation = 0
 
     private var reducedMotion: Bool {
         appearance?.reduceMotion == true || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    func show() {
+    func show(image: NSImage? = nil, clipboard: Bool = false) {
         hideWork?.cancel()
+        presentation += 1
+        let ticket = presentation
+        self.clipboard = clipboard
         let mouse = NSEvent.mouseLocation
         screenFrame = (NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main)?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1024, height: 768)
         display.phase = .listening
         display.status = "Слушаю…"
         display.text = ""
+        display.presented = image == nil || reducedMotion
+        display.image = image
         display.level = 0
         if panel == nil {
             let panel = DictationPanel(
@@ -150,6 +178,12 @@ final class Overlay {
         panel?.alphaValue = reducedMotion ? 1 : 0
         panel?.orderFrontRegardless()
         animateOpacity(to: 1, duration: 0.16)
+        if !display.presented {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.025) { [weak self] in
+                guard let self, self.presentation == ticket else { return }
+                self.display.presented = true
+            }
+        }
     }
 
     func update(text: String) {
@@ -158,6 +192,24 @@ final class Overlay {
         guard display.text != visibleText else { return }
         display.text = visibleText
         resize()
+    }
+
+    func image(_ value: NSImage?) {
+        display.image = value
+        resize()
+    }
+
+    func status(_ value: String, text: String? = nil, processing: Bool = false) {
+        display.status = value
+        display.phase = processing ? .finishing : .listening
+        if let text { update(text: text) }
+    }
+
+    func result(_ text: String, copied: Bool = true) {
+        display.phase = .closing
+        display.status = copied ? "Скопировано" : "Буфер изменился · Не скопировано"
+        update(text: text)
+        scheduleHide(after: copied ? 5 : 8)
     }
 
     func finish() {
@@ -176,13 +228,20 @@ final class Overlay {
     func fail(_ message: String) {
         if panel?.isVisible != true { show() }
         display.phase = .error
-        display.status = "Диктовка недоступна"
+        display.status = clipboard ? "Действие не выполнено" : "Диктовка недоступна"
         update(text: message)
         scheduleHide(after: 3.4)
     }
 
+    private func previewSize(width: CGFloat) -> CGSize {
+        guard let size = display.image?.size, size.width > 0, size.height > 0 else { return .zero }
+        let maxHeight = min(290, screenFrame.height * 0.33)
+        let scale = min(width / size.width, maxHeight / size.height)
+        return CGSize(width: round(size.width * scale), height: round(size.height * scale))
+    }
+
     private func view(width: CGFloat, height: CGFloat) -> DictationView {
-        DictationView(display: display, width: width, height: height, reducedMotion: reducedMotion,
+        DictationView(display: display, width: width, height: height, previewSize: previewSize(width: width), reducedMotion: reducedMotion,
                       appearance: appearance)
     }
 
@@ -208,9 +267,12 @@ final class Overlay {
         let height = min(cap, max(46, ceil(measured.height) + 29))
         host.rootView = view(width: width, height: height)
         // Keep space beneath the capsule for the text to animate out on release.
-        let panelHeight = display.text.isEmpty ? 58 : 66 + height
+        let previewHeight = previewSize(width: width).height
+        let panelHeight = (display.text.isEmpty ? 58 : 66 + height) + (previewHeight == 0 ? 0 : previewHeight + 8)
         let offset = min(screenFrame.height * 0.38, max(-screenFrame.height * 0.21, appearance?.verticalOffset ?? 68))
-        let top = max(screenFrame.minY + panelHeight + 8, screenFrame.midY + offset)
+        // Keep the image anchored when the live transcript grows beneath it.
+        let anchor = clipboard ? screenFrame.midY + previewHeight / 2 + 50 : screenFrame.midY + offset
+        let top = min(screenFrame.maxY - 8, max(screenFrame.minY + panelHeight + 8, anchor))
         let centered = screenFrame.midX - (width + 16) / 2
         let x = min(screenFrame.maxX - width - 16, max(screenFrame.minX, centered + (appearance?.horizontalOffset ?? 0)))
         let frame = CGRect(x: x, y: top - panelHeight,
@@ -228,15 +290,19 @@ final class Overlay {
 
     private func scheduleHide(after delay: TimeInterval) {
         hideWork?.cancel()
+        let ticket = presentation
         let work = DispatchWorkItem { [weak self] in
             guard let self, let panel = self.panel else { return }
+            self.display.presented = false
             let duration = self.reducedMotion ? 0.0 : 0.16
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = duration
                 panel.animator().alphaValue = 0
             } completionHandler: { [weak self] in
-                guard self?.panel?.alphaValue == 0 else { return }
+                guard self?.presentation == ticket, self?.panel?.alphaValue == 0 else { return }
                 self?.panel?.orderOut(nil)
+                self?.display.image = nil
+                self?.display.text = ""
             }
         }
         hideWork = work

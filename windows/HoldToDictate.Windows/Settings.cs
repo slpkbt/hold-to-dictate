@@ -7,6 +7,9 @@ internal sealed record Settings
 {
     public string Shortcut { get; init; } = "ctrl+shift+k";
     public string Engine { get; init; } = "onDevice";
+    public string AgentModel { get; init; } = "gpt-6-luna";
+    public string AgentReasoningEffort { get; init; } = "low";
+    public string CodexExecutable { get; init; } = "";
     public string Language { get; init; } = "";
     public bool PasteAutomatically { get; init; } = false;
     public bool PlaySound { get; init; } = false;
@@ -35,6 +38,11 @@ internal sealed record Settings
     public void Validate()
     {
         _ = Hotkey.Parse(Shortcut);
+        if (string.IsNullOrWhiteSpace(AgentModel) || AgentModel.Contains('\n') || AgentModel.Contains('\r'))
+            throw new FormatException("Enter a valid agent model.");
+        if (AgentReasoningEffort is not ("minimal" or "low" or "medium" or "high" or "xhigh" or "max"))
+            throw new FormatException("Choose a supported reasoning effort.");
+        if (CodexExecutable is null) throw new FormatException("Invalid Codex executable path.");
         if (Engine is not ("onDevice" or "codex")) throw new FormatException("Choose a supported recognition engine.");
         if (Language is null || Accent is null || Accent.Length != 7 || Accent[0] != '#'
             || !uint.TryParse(Accent.AsSpan(1), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out _))

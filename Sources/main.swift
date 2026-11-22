@@ -50,6 +50,14 @@ private struct PasteTarget {
 final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menuItem: NSStatusItem?
     private var hotkey: Hotkey?
+    private var actionHotkey: Hotkey?
+    private var actionID: UUID?
+    private var actionPayload: ClipboardPayload?
+    private var actionGesture: ClipboardGesture?
+    private var actionClipboardCount = 0
+    private var actionEdit = false
+    private var actionReleased = false
+    private var actionEarlyResult: String?
     private var settings: Settings?
     private let overlay = Overlay()
     private var microphone: Microphone?
@@ -63,6 +71,13 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var startSound: NSSound?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let index = CommandLine.arguments.firstIndex(of: "--preview-clipboard"),
+           CommandLine.arguments.indices.contains(index + 1),
+           let image = NSImage(contentsOfFile: CommandLine.arguments[index + 1]) {
+            try? loadSettings()
+            showClipboardPreview(image)
+            return
+        }
         if CommandLine.arguments.contains("--preview") {
             try? loadSettings()
             showPreview(standalone: true)
@@ -105,6 +120,7 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func loadSettings() throws {
         let newSettings = try Settings.load()
         _ = try Shortcut(newSettings.shortcut)
+        _ = try Shortcut(newSettings.clipboardAction.shortcut)
         settings = newSettings
         overlay.appearance = newSettings.appearance
     }
@@ -114,21 +130,32 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func reload() {
-        guard activeID == nil else { return }
+        guard activeID == nil, actionID == nil else { return }
         do {
             let previous = settings
             try loadSettings()
-            guard hotkey == nil || previous?.shortcut.lowercased() != settings?.shortcut.lowercased(),
-                  let settings else { return }
+            guard let settings else { return }
+            let changed = hotkey == nil || actionHotkey == nil || previous?.shortcut.lowercased() != settings.shortcut.lowercased() || previous?.clipboardAction.shortcut.lowercased() != settings.clipboardAction.shortcut.lowercased()
+            guard changed else { return }
             hotkey?.invalidate()
+            actionHotkey?.invalidate()
             hotkey = nil
+            actionHotkey = nil
             do {
                 hotkey = try register(settings.shortcut)
+                actionHotkey = try registerAction(settings.clipboardAction.shortcut)
             } catch {
+                hotkey?.invalidate()
+                actionHotkey?.invalidate()
+                hotkey = nil
+                actionHotkey = nil
                 if let previous {
                     hotkey = try? register(previous.shortcut)
+                    actionHotkey = try? registerAction(previous.clipboardAction.shortcut)
                     self.settings = previous
                     overlay.appearance = previous.appearance
+                } else {
+                    hotkey = try? register(settings.shortcut)
                 }
                 throw error
             }
@@ -142,6 +169,10 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             if pressed { self.start() } else { self.finish() }
         }
+    }
+
+    private func registerAction(_ string: String) throws -> Hotkey {
+        try Hotkey(Shortcut(string)) { [weak self] pressed in self?.actionKey(pressed) }
     }
 
     @objc private func requestPermissions() {
@@ -191,7 +222,7 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func preview() { showPreview(standalone: false) }
 
     private func showPreview(standalone: Bool) {
-        guard activeID == nil else { return }
+        guard activeID == nil, actionID == nil else { return }
         previewTask?.cancel()
         overlay.show()
         previewTask = Task { [weak self] in
@@ -216,8 +247,21 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func showClipboardPreview(_ image: NSImage) {
+        overlay.show(image: image, clipboard: true)
+        overlay.status("Инструкция · Слушаю…", text: "Опиши, что изображено на фотографии.")
+        previewTask = Task { [weak self] in
+            for step in 0..<100 {
+                guard !Task.isCancelled else { return }
+                self?.overlay.display.level = 0.25 + 0.55 * abs(sin(Double(step) * 0.41))
+                try? await Task.sleep(for: .milliseconds(65))
+            }
+            NSApp.terminate(nil)
+        }
+    }
+
     private func start() {
-        guard activeID == nil, let settings else { return }
+        guard activeID == nil, actionID == nil, let settings else { return }
         previewTask?.cancel()
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .notDetermined:
@@ -292,6 +336,154 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func actionKey(_ pressed: Bool) {
+        let now = ProcessInfo.processInfo.systemUptime
+        if actionID == nil {
+            guard pressed, activeID == nil, settings != nil else { return }
+            let count = NSPasteboard.general.changeCount
+            guard let payload = ClipboardPayload.capture(.general), NSPasteboard.general.changeCount == count else { return }
+            guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+                if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+                    AVCaptureDevice.requestAccess(for: .audio) { [weak self] allowed in
+                        Task { @MainActor in self?.overlay.fail(allowed ? "Микрофон разрешён. Нажмите сочетание ещё раз." : "Разрешите доступ к микрофону в настройках macOS.") }
+                    }
+                } else { overlay.fail("Разрешите доступ к микрофону в настройках macOS.") }
+                return
+            }
+            actionPayload = payload
+            actionClipboardCount = count
+            if case .image = payload { actionGesture = ClipboardGesture(image: true) }
+            else { actionGesture = ClipboardGesture(image: false) }
+            _ = actionGesture?.press(now)
+            startAction()
+            return
+        }
+        guard !actionReleased else { return }
+        let action = pressed ? actionGesture?.press(now) : actionGesture?.release(now)
+        switch action {
+        case .edit:
+            actionEdit = true
+            overlay.status("Редактирование изображения · Слушаю…")
+        case .finish: finishAction()
+        case .some(.none):
+            if !pressed, case .image = actionPayload {
+                overlay.status("Запись идёт · Нажмите ещё раз для завершения")
+            }
+        default: break
+        }
+    }
+
+    private func startAction() {
+        let id = UUID()
+        actionID = id
+        actionReleased = false
+        actionEdit = false
+        actionEarlyResult = nil
+        previewTask?.cancel()
+        do {
+            let provider = try CodexTranscription(update: { [weak self] text in
+                guard let self, self.actionID == id else { return }
+                self.overlay.update(text: text)
+            }, complete: { [weak self] result in
+                guard let self, self.actionID == id else { return }
+                self.actionTranscribed(result)
+            })
+            transcription = provider
+            let capture = Microphone()
+            microphone = capture
+            try capture.start(consume: provider.consume) { [weak self] level in
+                Task { @MainActor in
+                    guard let self, self.actionID == id, !self.actionReleased else { return }
+                    self.overlay.display.level = CGFloat(level)
+                }
+            }
+            if case .image(let bytes) = actionPayload {
+                overlay.show(image: NSImage(data: bytes), clipboard: true)
+            } else {
+                overlay.show(clipboard: true)
+            }
+            overlay.status("Инструкция · Слушаю…")
+            if settings?.playSound == true { playSound(named: settings?.startSound ?? "Tink") }
+            limit = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(240))
+                if !Task.isCancelled, self?.actionID == id { self?.actionTranscribed(.failure(DictationError("Достигнут лимит в четыре минуты."))) }
+            }
+        } catch { actionTranscribed(.failure(error)) }
+    }
+
+    private func finishAction() {
+        guard actionID != nil, !actionReleased else { return }
+        actionReleased = true
+        microphone?.stop()
+        overlay.status("Распознаю инструкцию…", processing: true)
+        if let actionEarlyResult { actionTranscribed(.success(actionEarlyResult)) }
+        else { transcription?.finish() }
+    }
+
+    private func actionTranscribed(_ result: Result<String, Error>) {
+        if case .success(let text) = result, !actionReleased { actionEarlyResult = text; return }
+        microphone?.stop()
+        transcription?.cancel()
+        limit?.cancel()
+        microphone = nil
+        transcription = nil
+        switch result {
+        case .failure(let error):
+            actionID = nil
+            actionPayload = nil
+            actionGesture = nil
+            overlay.fail(error.localizedDescription)
+        case .success(let text):
+            let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !instruction.isEmpty, let payload = actionPayload, let settings, let id = actionID else {
+                actionID = nil
+                actionPayload = nil
+                actionGesture = nil
+                overlay.fail("Речь не распознана.")
+                return
+            }
+            let edit = actionEdit
+            let count = actionClipboardCount
+            overlay.status("Обрабатываю…", text: instruction, processing: true)
+            Task { [weak self] in
+                let result = await Task.detached {
+                    Result { try ClipboardAgent.run(payload: payload, instruction: instruction, edit: edit, settings: settings.clipboardAction) }
+                }.value
+                guard let self, self.actionID == id else { return }
+                self.actionID = nil
+                self.actionPayload = nil
+                self.actionGesture = nil
+                switch result {
+                case .failure(let error): self.overlay.fail(error.localizedDescription)
+                case .success(let output):
+                    let board = NSPasteboard.general
+                    guard board.changeCount == count else {
+                        switch output {
+                        case .text(let text): self.overlay.result(text, copied: false)
+                        case .image(let data):
+                            self.overlay.image(NSImage(data: data))
+                            self.overlay.result("Изображение готово", copied: false)
+                        }
+                        return
+                    }
+                    board.clearContents()
+                    let written: Bool
+                    let preview: String
+                    switch output {
+                    case .text(let text): written = board.setString(text, forType: .string); preview = text
+                    case .image(let data): written = board.setData(data, forType: .png); preview = "Изображение готово"
+                    }
+                    if written {
+                        if case .image(let data) = output { self.overlay.image(NSImage(data: data)) }
+                        self.overlay.result(preview)
+                    } else {
+                        self.overlay.fail("Не удалось записать результат в буфер обмена.")
+                    }
+                }
+            }
+        }
+    }
+
     private func playSound(named value: String) {
         if value.hasPrefix("/") || value.hasPrefix("~/") {
             let file = (value as NSString).expandingTildeInPath
@@ -355,8 +547,10 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        ClipboardAgent.cancelAll()
         cleanUp()
         hotkey?.invalidate()
+        actionHotkey?.invalidate()
     }
 }
 

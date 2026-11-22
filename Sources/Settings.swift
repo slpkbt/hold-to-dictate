@@ -9,6 +9,14 @@ struct Settings: Decodable {
     let startSound: String?
     let appearance: Appearance
     let engine: Engine
+    let clipboardAction: ClipboardAction
+
+    struct ClipboardAction: Decodable {
+        let shortcut: String
+        let model: String
+        let effort: String
+        let executable: String?
+    }
 
     enum Engine: String, Decodable { case codex, onDevice }
 
@@ -45,7 +53,7 @@ struct Settings: Decodable {
             let local = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any]
             guard let local else { throw DictationError("В settings.json ожидается JSON-объект.") }
             for (key, value) in local {
-                if key == "appearance", let appearance = value as? [String: Any],
+                if (key == "appearance" || key == "clipboardAction"), let appearance = value as? [String: Any],
                    let fallback = defaults[key] as? [String: Any] {
                     merged[key] = fallback.merging(appearance) { _, new in new }
                 } else {

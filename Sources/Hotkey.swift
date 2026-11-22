@@ -3,6 +3,8 @@ import Carbon
 
 @MainActor
 final class Hotkey {
+    private static var nextID: UInt32 = 0
+    private let id: UInt32
     private var reference: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var releaseTimer: Timer?
@@ -13,6 +15,8 @@ final class Hotkey {
     init(_ shortcut: Shortcut, changed: @escaping (Bool) -> Void) throws {
         self.shortcut = shortcut
         self.changed = changed
+        Self.nextID += 1
+        self.id = Self.nextID
 
         var eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
@@ -26,14 +30,15 @@ final class Hotkey {
                                            MemoryLayout<EventHotKeyID>.size, nil, &id)
             guard result == noErr, id.signature == 0x48444943 else { return OSStatus(eventNotHandledErr) }
             let hotkey = Unmanaged<Hotkey>.fromOpaque(context).takeUnretainedValue()
-            MainActor.assumeIsolated {
+            return MainActor.assumeIsolated {
+                guard id.id == hotkey.id else { return OSStatus(eventNotHandledErr) }
                 hotkey.handle(pressed: GetEventKind(event) == UInt32(kEventHotKeyPressed))
+                return noErr
             }
-            return noErr
         }, eventTypes.count, &eventTypes, Unmanaged.passUnretained(self).toOpaque(), &handler)
         guard status == noErr else { throw DictationError("Не удалось настроить глобальный хоткей.") }
         let registration = RegisterEventHotKey(shortcut.keyCode, shortcut.carbonModifiers,
-                                               EventHotKeyID(signature: 0x48444943, id: 1),
+                                               EventHotKeyID(signature: 0x48444943, id: id),
                                                GetEventDispatcherTarget(), 0, &reference)
         guard registration == noErr else {
             invalidate()

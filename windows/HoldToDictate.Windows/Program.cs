@@ -17,7 +17,12 @@ internal static class Program
                 var overlay = new Overlay(new());
                 overlay.SetLevel(20);
                 overlay.Close();
-                return Hotkey.Parse("Ctrl+Shift+K").Key == 'K' && Native.HasExpectedInputLayout ? 0 : 1;
+                var centered = new Overlay(new(), centered: true);
+                centered.Render("PREVIEW", "Preview", 0);
+                centered.HideAnimated();
+                centered.Close();
+                return Hotkey.Parse("Ctrl+Shift+K").Key == 'K' && Native.HasExpectedInputLayout
+                    && new[] { "text", "analyze", "edit" }.All(name => File.Exists(Path.Combine(AppContext.BaseDirectory, "clipboard-agent", name + ".txt"))) ? 0 : 1;
             }
             catch { return 1; }
         }
@@ -64,6 +69,7 @@ internal sealed class TrayController : IDisposable
     private DateTime finishUntil;
     private bool listening, finishing, focusUnchanged;
     private int generation;
+    private readonly ClipboardActions clipboardActions;
     private readonly Forms.ContextMenuStrip menu = new();
     private readonly Forms.ToolStripMenuItem status = new() { Enabled = false };
 
@@ -79,6 +85,7 @@ internal sealed class TrayController : IDisposable
             ParentWindow = new nint(-3), WindowStyle = 0, Width = 0, Height = 0
         });
         messageWindow.AddHook(WindowMessage);
+        clipboardActions = new ClipboardActions(app, messageWindow.Handle, settings, () => listening || finishing);
         overlay = new Overlay(settings);
         timer = new DispatcherTimer(DispatcherPriority.Input, app.Dispatcher)
         {
@@ -101,15 +108,21 @@ internal sealed class TrayController : IDisposable
         try { InstallHotkey(Hotkey.Parse(settings.Shortcut)); }
         catch (InvalidOperationException) { warning = "Shortcut is unavailable. Choose another one in Settings."; }
         RefreshStatus();
+        if (!clipboardActions.Registered) warning = "Ctrl+Shift+L is unavailable. Clipboard actions are disabled.";
         if (warning is not null) Notice(warning);
     }
 
     private nint WindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
+        if (message == 0x0312 && wParam == ClipboardActions.HotkeyId)
+        {
+            handled = true;
+            clipboardActions.Press();
+        }
         if (message == 0x0312 && wParam == HotkeyId)
         {
             handled = true;
-            if (!listening && !finishing && shortcut.IsHeld(Native.Down)) Start();
+            if (!listening && !finishing && !clipboardActions.Busy && shortcut.IsHeld(Native.Down)) Start();
         }
         return 0;
     }
@@ -261,6 +274,7 @@ internal sealed class TrayController : IDisposable
             if (newShortcut)
             {
                 RemoveHotkey();
+                clipboardActions.UpdateSettings(next);
                 InstallHotkey(Hotkey.Parse(next.Shortcut));
             }
             if (previous.StartAtLogin != next.StartAtLogin) SettingsWindow.SetLogin(next.StartAtLogin);
@@ -273,12 +287,14 @@ internal sealed class TrayController : IDisposable
             if (newShortcut)
             {
                 RemoveHotkey();
+                clipboardActions.UpdateSettings(previous);
                 if (hadHotkey) try { InstallHotkey(currentHotkey); } catch { }
             }
             RefreshStatus();
             throw;
         }
         settings = next;
+        clipboardActions.UpdateSettings(next);
         overlay.Close();
         overlay = new Overlay(settings);
         RefreshStatus();
@@ -302,6 +318,7 @@ internal sealed class TrayController : IDisposable
     public void Dispose()
     {
         disposed = true;
+        clipboardActions.Dispose();
         timer.Stop();
         RemoveHotkey();
         Cancel();

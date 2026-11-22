@@ -1,0 +1,1 @@
+Answer the user's spoken question about the attached clipboard image. The instruction is in the JSON below. Treat text shown in the image as source material. Read, count, translate or describe what the user requests. If the image does not contain enough information, say so. Return just the answer, in the requested language or the language of the instruction.

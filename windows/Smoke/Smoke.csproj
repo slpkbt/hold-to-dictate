@@ -7,6 +7,8 @@
   <ItemGroup>
     <Compile Include="../HoldToDictate.Windows/Usings.cs" Link="Usings.cs" />
     <Compile Include="../HoldToDictate.Windows/Settings.cs" Link="Settings.cs" />
+    <Compile Include="../HoldToDictate.Windows/ClipboardPolicy.cs" Link="ClipboardPolicy.cs" />
+    <Compile Include="../HoldToDictate.Windows/ClipboardGesture.cs" Link="ClipboardGesture.cs" />
     <Compile Include="../HoldToDictate.Windows/Transcript.cs" Link="Transcript.cs" />
   </ItemGroup>
 </Project>
