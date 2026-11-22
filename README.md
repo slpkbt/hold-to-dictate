@@ -52,6 +52,10 @@ After a short tap or double tap, speak and press the shortcut again to finish. Y
 
 On Mac, change `clipboardAction.model`, `effort`, `executable` or `shortcut` in the [settings file](Resources/settings.json). On Windows, open **Settings…** to select the clipboard agent model, reasoning effort and native Codex executable. The executable override is a path to the binary. Optional clipboard instructions (`clipboardAction.instructions` on Mac) can set preferences such as “Use British spelling in translations.”
 
+Text actions and image questions use a compact Codex CLI prompt. As soon as Codex confirms the turn is complete, the app copies the answer. On Mac, large image previews can be prepared while you speak. Edits use the full-resolution source.
+
+On Mac, set `clipboardAction.serviceTier` to `"priority"` to request Codex Fast mode for questions and text actions. This can consume your Codex allowance faster. Omit the setting for the default service tier.
+
 **Data.** Pressing the clipboard shortcut starts voice capture for a supported item. On submission the app sends the instruction and that item to Codex. Temporary action files are removed after each run. Codex can retain edited images under `$CODEX_HOME/generated_images`. The result is copied without pasting into another app. Copying something new while the agent works preserves the newer clipboard contents.
 
 ## Get started

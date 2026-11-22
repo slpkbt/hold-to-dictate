@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ImageIO
 
 enum ClipboardPayload {
     case text(String)
@@ -14,12 +15,13 @@ enum ClipboardPayload {
                 return name.contains("promised-file") || name.contains("filepromise") || name == "nsfilenamespboardtype"
             }
         }) else { return nil }
-        if let data = board.data(forType: .png), NSImage(data: data) != nil { return .image(data) }
-        let imageTypes: [NSPasteboard.PasteboardType] = [.tiff, NSPasteboard.PasteboardType("public.jpeg"), NSPasteboard.PasteboardType("public.heic")]
+        let imageTypes: [NSPasteboard.PasteboardType] = [
+            .png, .tiff, NSPasteboard.PasteboardType("public.jpeg"), NSPasteboard.PasteboardType("public.heic")
+        ]
         for type in imageTypes {
-            if let data = board.data(forType: type), let image = NSImage(data: data),
-               let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
-               let png = bitmap.representation(using: .png, properties: [:]) { return .image(png) }
+            if let data = board.data(forType: type), CGImageSourceCreateWithData(data as CFData, nil) != nil {
+                return .image(data)
+            }
         }
         if let text = board.string(forType: .string), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return .text(text)
@@ -75,18 +77,31 @@ enum ClipboardAgent {
     }
 
     static func run(payload: ClipboardPayload, instruction: String, edit: Bool,
-                    settings: Settings.ClipboardAction, resourceDirectory: URL? = nil) throws -> ClipboardAgentResult {
+                    settings: Settings.ClipboardAction, resourceDirectory: URL? = nil,
+                    preparedImage: ClipboardImage.Packed? = nil,
+                    onProgress: @escaping (String) -> Void = { _ in },
+                    onReady: @escaping (String) -> Void = { _ in },
+                    bundledExecutable: URL? = nil) throws -> ClipboardAgentResult {
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("hold-to-dictate-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? manager.removeItem(at: directory) }
         let kind: String
+        var imagePath: String?
         var input: [String: String] = ["instruction": instruction]
         switch payload {
         case .text(let text): kind = "text"; input["text"] = text
         case .image(let bytes):
             kind = edit ? "edit" : "analyze"
-            try bytes.write(to: directory.appendingPathComponent("input.png"))
+            if edit {
+                imagePath = "input.png"
+                try ClipboardImage.pngForCLI(bytes).write(to: directory.appendingPathComponent("input.png"))
+            } else {
+                let image = try preparedImage ?? ClipboardImage.forAnalysis(bytes)
+                let name = image.mime == "image/jpeg" ? "input.jpg" : "input.png"
+                imagePath = name
+                try image.data.write(to: directory.appendingPathComponent(name))
+            }
         }
         guard let resource = (resourceDirectory ?? Bundle.main.resourceURL)?.appendingPathComponent("clipboard-agent/\(kind).txt"),
               let template = try? String(contentsOf: resource, encoding: .utf8) else {
@@ -96,11 +111,17 @@ enum ClipboardAgent {
             input["preferences"] = preferences
         }
         let json = try JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])
-        let prompt = template + "\n" + String(decoding: json, as: UTF8.self)
-        let environment = try invoke(prompt: prompt, payload: payload, kind: kind, settings: settings, directory: directory)
+        let customExecutable = !(settings.executable?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let fast = kind != "edit" && !customExecutable
+        let payloadJSON = String(decoding: json, as: UTF8.self)
+        let prompt = fast ? payloadJSON : template + "\n" + payloadJSON
+        let threadID = try invoke(prompt: prompt, imagePath: imagePath, kind: kind,
+                                     settings: settings, directory: directory, bundledExecutable: bundledExecutable,
+                                     instructionFile: fast ? resource : nil,
+                                     onProgress: onProgress, onReady: fast ? onReady : { _ in })
         if kind == "edit" {
-            return .image(try generatedImage(eventsURL: directory.appendingPathComponent("events.jsonl"),
-                                             directory: directory, environment: environment))
+            return .image(try generatedImage(threadID: threadID, directory: directory,
+                                             environment: ProcessInfo.processInfo.environment))
         }
         guard let reply = try? String(contentsOf: directory.appendingPathComponent("reply.txt"), encoding: .utf8),
               !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -114,12 +135,14 @@ enum ClipboardAgent {
         return .text(output)
     }
 
-    private static func invoke(prompt: String, payload: ClipboardPayload, kind: String,
-                               settings: Settings.ClipboardAction, directory: URL) throws -> [String: String] {
+    private static func invoke(prompt: String, imagePath: String?, kind: String,
+                               settings: Settings.ClipboardAction, directory: URL, bundledExecutable: URL?, instructionFile: URL?,
+                               onProgress: @escaping (String) -> Void, onReady: @escaping (String) -> Void) throws -> String? {
+        let parseEvents = instructionFile != nil || kind == "edit"
         let manager = FileManager.default
         let process = Process()
         let executable = settings.executable?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let bundled = [
+        let bundled = bundledExecutable?.path ?? [
             "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
             "/Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
             "/Applications/Codex.app/Contents/Resources/codex"
@@ -139,10 +162,23 @@ enum ClipboardAgent {
                         "view_image", "browser_use", "computer_use"] {
             arguments += ["--disable", feature]
         }
-        if kind == "edit" { arguments += ["--enable", "image_generation", "--json"] }
+        if let instructionFile {
+            let jsonString = try JSONSerialization.data(withJSONObject: [instructionFile.path], options: [.withoutEscapingSlashes])
+            let quoted = String(decoding: jsonString, as: UTF8.self).dropFirst().dropLast()
+            arguments += ["--enable", "skip_host_skill_discovery", "--disable", "tool_suggest",
+                          "-c", "analytics.enabled=false", "-c", "include_apps_instructions=false",
+                          "-c", "include_environment_context=false", "-c", "include_collaboration_mode_instructions=false",
+                          "-c", "skills.include_instructions=false",
+                          "-c", "model_instructions_file=\(quoted)"]
+        }
+        if kind != "edit", settings.serviceTier == "priority" {
+            arguments += ["-c", "service_tier=\"priority\""]
+        }
+        if kind == "edit" { arguments += ["--enable", "image_generation"] }
         else { arguments += ["--disable", "image_generation"] }
+        arguments += ["--json"]
         arguments += ["-o", "reply.txt"]
-        if case .image = payload { arguments += ["--image", "input.png"] }
+        if let imagePath { arguments += ["--image", imagePath] }
         arguments += ["-"]
         process.arguments = arguments
         process.currentDirectoryURL = directory
@@ -155,11 +191,8 @@ enum ClipboardAgent {
         let stdin = try FileHandle(forReadingFrom: promptURL)
         defer { try? stdin.close() }
         process.standardInput = stdin
-        let eventsURL = directory.appendingPathComponent("events.jsonl")
-        manager.createFile(atPath: eventsURL.path, contents: nil)
-        let events = try FileHandle(forWritingTo: eventsURL)
-        defer { try? events.close() }
-        process.standardOutput = kind == "edit" ? events : FileHandle.nullDevice
+        let output = Pipe()
+        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         do { try process.run() } catch { throw DictationError("Не удалось запустить Codex CLI. Проверьте executable в настройках.") }
         lock.lock()
@@ -173,31 +206,38 @@ enum ClipboardAgent {
         let timeout = DispatchWorkItem { [weak process] in
             if let process, process.isRunning { process.terminate() }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 300, execute: timeout)
+        DispatchQueue.global().asyncAfter(deadline: .now() + (kind == "edit" ? 300 : 120), execute: timeout)
+        var events = CLIEventStream()
+        var streamError: Error?
+        while true {
+            let data = output.fileHandleForReading.availableData
+            if data.isEmpty { break }
+            if !parseEvents { continue }
+            do { try events.feed(data, onProgress: onProgress, onReady: onReady) }
+            catch {
+                streamError = error
+                if process.isRunning { process.terminate() }
+                break
+            }
+        }
+        try? output.fileHandleForReading.close()
         process.waitUntilExit()
         timeout.cancel()
-        try? events.synchronize()
-        guard process.terminationStatus == 0 else { throw DictationError("Codex CLI не выполнил действие.") }
-        return environment
+        if let streamError { throw streamError }
+        if parseEvents { try events.finish(onProgress: onProgress, onReady: onReady) }
+        guard process.terminationStatus == 0, !events.failed, instructionFile == nil || events.succeeded else {
+            throw DictationError("Codex CLI не выполнил действие.")
+        }
+        return events.threadID
     }
 
-    static func generatedImage(eventsURL: URL, directory: URL, environment: [String: String]) throws -> Data {
+    static func generatedImage(threadID: String?, directory: URL, environment: [String: String]) throws -> Data {
         let manager = FileManager.default
-        guard let size = (try? manager.attributesOfItem(atPath: eventsURL.path)[.size]) as? NSNumber,
-              size.intValue <= 10_000_000,
-              let log = try? String(contentsOf: eventsURL, encoding: .utf8) else {
-            throw DictationError("Codex не вернул сведения об изображении.")
-        }
-        let threadID = log.split(separator: "\n").compactMap { line -> String? in
-            guard let object = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
-                  object["type"] as? String == "thread.started",
-                  let id = object["thread_id"] as? String, UUID(uuidString: id) != nil else { return nil }
-            return id
-        }.first
+        let validID = threadID.flatMap { UUID(uuidString: $0) != nil ? $0 : nil }
         let codexHome = environment["CODEX_HOME"].map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true) }
             ?? manager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
         let cache = codexHome.resolvingSymlinksInPath().appendingPathComponent("generated_images", isDirectory: true)
-        let roots = [threadID.map { cache.appendingPathComponent($0, isDirectory: true) },
+        let roots = [validID.map { cache.appendingPathComponent($0, isDirectory: true) },
                      directory.appendingPathComponent("generated_images", isDirectory: true)].compactMap { $0 }
         let candidates = roots.flatMap { root -> [URL] in
             let canonical = root.resolvingSymlinksInPath().standardizedFileURL
@@ -221,5 +261,59 @@ enum ClipboardAgent {
             throw DictationError("Codex не вернул изображение.")
         }
         return data
+    }
+}
+
+// Codex exec --json emits JSONL; stdout is drained while the child is running.
+struct CLIEventStream {
+    private var buffer = Data()
+    private var received = 0
+    private(set) var threadID: String?
+    private(set) var failed = false
+    private(set) var succeeded = false
+    private var completedMessage: String?
+    private var delivered = false
+
+    mutating func feed(_ data: Data, onProgress: (String) -> Void,
+                       onReady: (String) -> Void = { _ in }) throws {
+        received += data.count
+        guard received <= 10_000_000 else { throw DictationError("Codex вернул слишком большой поток событий.") }
+        buffer.append(data)
+        while let end = buffer.firstIndex(of: 10) {
+            let line = Data(buffer[..<end])
+            buffer.removeSubrange(...end)
+            try parse(line, onProgress: onProgress, onReady: onReady)
+        }
+        guard buffer.count <= 1_000_000 else { throw DictationError("Codex вернул слишком большое событие.") }
+    }
+
+    mutating func finish(onProgress: (String) -> Void, onReady: (String) -> Void = { _ in }) throws {
+        if !buffer.isEmpty { try parse(buffer, onProgress: onProgress, onReady: onReady); buffer.removeAll() }
+    }
+
+    private mutating func parse(_ line: Data, onProgress: (String) -> Void, onReady: (String) -> Void) throws {
+        guard !line.isEmpty else { return }
+        guard line.count <= 1_000_000,
+              let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
+              let type = event["type"] as? String else {
+            throw DictationError("Codex вернул незнакомый поток событий.")
+        }
+        if type == "thread.started", let id = event["thread_id"] as? String, UUID(uuidString: id) != nil {
+            threadID = id
+        } else if type == "turn.failed" || type == "error" {
+            failed = true
+        } else if type == "turn.completed", !failed {
+            succeeded = true
+            if !delivered, let text = completedMessage,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                delivered = true
+                onReady(text)
+            }
+        } else if type == "item.updated" || type == "item.completed",
+                  let item = event["item"] as? [String: Any], item["type"] as? String == "agent_message",
+                  let text = item["text"] as? String, !text.isEmpty {
+            if type == "item.completed" { completedMessage = text }
+            onProgress(text)
+        }
     }
 }

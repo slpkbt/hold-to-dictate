@@ -17,6 +17,7 @@ struct Settings: Decodable {
         let effort: String
         let executable: String?
         var instructions: String? = nil
+        var serviceTier: String? = nil
     }
 
     enum Engine: String, Decodable { case codex, onDevice }

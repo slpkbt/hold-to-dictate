@@ -20,6 +20,7 @@
     "model": "gpt-6-luna",
     "effort": "low",
     "executable": null,
-    "instructions": ""
+    "instructions": "",
+    "serviceTier": null
   }
 }

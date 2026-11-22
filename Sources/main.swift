@@ -58,6 +58,8 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var actionEdit = false
     private var actionReleased = false
     private var actionEarlyResult: String?
+    private var actionImagePreparation: Task<ClipboardImage.Packed, Error>?
+    private var actionWork: Task<Void, Never>?
     private var settings: Settings?
     private let overlay = Overlay()
     private var microphone: Microphone?
@@ -385,6 +387,12 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         actionReleased = false
         actionEdit = false
         actionEarlyResult = nil
+        if case .image(let bytes) = actionPayload {
+            actionImagePreparation = Task.detached {
+                try Task.checkCancellation()
+                return try ClipboardImage.forAnalysis(bytes)
+            }
+        } else { actionImagePreparation = nil }
         previewTask?.cancel()
         do {
             let provider = try CodexTranscription(update: { [weak self] text in
@@ -439,6 +447,8 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             actionID = nil
             actionPayload = nil
             actionGesture = nil
+            actionImagePreparation?.cancel()
+            actionImagePreparation = nil
             overlay.fail(error.localizedDescription)
         case .success(let text):
             let instruction = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -446,47 +456,81 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 actionID = nil
                 actionPayload = nil
                 actionGesture = nil
+                actionImagePreparation?.cancel()
+                actionImagePreparation = nil
                 overlay.fail("Речь не распознана.")
                 return
             }
             let edit = actionEdit
             let count = actionClipboardCount
             overlay.status(edit ? "Редактирую изображение…" : "Готовлю ответ…", text: instruction, processing: true)
-            Task { [weak self] in
+            let preparation = actionImagePreparation
+            if edit { preparation?.cancel() }
+            actionWork = Task { [weak self] in
+                let owner = self
                 let result = await Task.detached {
-                    Result { try ClipboardAgent.run(payload: payload, instruction: instruction, edit: edit, settings: settings.clipboardAction) }
-                }.value
-                guard let self, self.actionID == id else { return }
-                self.actionID = nil
-                self.actionPayload = nil
-                self.actionGesture = nil
-                switch result {
-                case .failure(let error): self.overlay.fail(error.localizedDescription)
-                case .success(let output):
-                    let board = NSPasteboard.general
-                    guard board.changeCount == count else {
-                        switch output {
-                        case .text(let text): self.overlay.result(text, copied: false)
-                        case .image(let data):
-                            self.overlay.image(NSImage(data: data))
-                            self.overlay.result("Изображение готово", copied: false)
+                    do {
+                        let packed: ClipboardImage.Packed?
+                        if !edit, case .image(let bytes) = payload,
+                           ClipboardImage.instructionNeedsTextDetail(instruction) {
+                            preparation?.cancel()
+                            packed = try ClipboardImage.forAnalysis(bytes, preserveText: true)
+                        } else {
+                            packed = try await (!edit ? preparation?.value : nil)
                         }
-                        return
-                    }
-                    board.clearContents()
-                    let written: Bool
-                    let preview: String
-                    switch output {
-                    case .text(let text): written = board.setString(text, forType: .string); preview = text
-                    case .image(let data): written = board.setData(data, forType: .png); preview = "Изображение готово"
-                    }
-                    if written {
-                        if case .image(let data) = output { self.overlay.image(NSImage(data: data)) }
-                        self.overlay.result(preview)
-                    } else {
-                        self.overlay.fail("Не удалось записать результат в буфер обмена.")
-                    }
+                        let output = try ClipboardAgent.run(
+                            payload: payload, instruction: instruction, edit: edit,
+                            settings: settings.clipboardAction, preparedImage: packed,
+                            onProgress: { [weak owner] text in
+                                DispatchQueue.main.async {
+                                    guard let owner, owner.actionID == id else { return }
+                                    owner.overlay.status("Готовлю ответ…", text: text, processing: true)
+                                }
+                            }, onReady: { [weak owner] text in
+                                DispatchQueue.main.async {
+                                    owner?.finishActionResult(.success(.text(text)), id: id, count: count)
+                                }
+                            })
+                        return Result<ClipboardAgentResult, Error>.success(output)
+                    } catch { return Result<ClipboardAgentResult, Error>.failure(error) }
+                }.value
+                owner?.finishActionResult(result, id: id, count: count)
+            }
+        }
+    }
+
+    private func finishActionResult(_ result: Result<ClipboardAgentResult, Error>, id: UUID, count: Int) {
+        guard actionID == id else { return }
+        actionID = nil
+        actionPayload = nil
+        actionGesture = nil
+        actionImagePreparation = nil
+        actionWork = nil
+        switch result {
+        case .failure(let error): overlay.fail(error.localizedDescription)
+        case .success(let output):
+            let board = NSPasteboard.general
+            guard board.changeCount == count else {
+                switch output {
+                case .text(let text): overlay.result(text, copied: false)
+                case .image(let data):
+                    overlay.image(NSImage(data: data))
+                    overlay.result("Изображение готово", copied: false)
                 }
+                return
+            }
+            board.clearContents()
+            let written: Bool
+            let preview: String
+            switch output {
+            case .text(let text): written = board.setString(text, forType: .string); preview = text
+            case .image(let data): written = board.setData(data, forType: .png); preview = "Изображение готово"
+            }
+            if written {
+                if case .image(let data) = output { overlay.image(NSImage(data: data)) }
+                overlay.result(preview)
+            } else {
+                overlay.fail("Не удалось записать результат в буфер обмена.")
             }
         }
     }
@@ -554,6 +598,8 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        actionImagePreparation?.cancel()
+        actionWork?.cancel()
         ClipboardAgent.cancelAll()
         cleanUp()
         hotkey?.invalidate()

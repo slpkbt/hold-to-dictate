@@ -138,10 +138,15 @@ internal sealed class ClipboardActions : IDisposable
         if (string.IsNullOrWhiteSpace(instruction)) { Cancel(); return; }
         overlay.Render("WORKING", "Running clipboard action…", 0);
         overlay.SetWorking(true);
-        operation = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+        operation = new CancellationTokenSource(edit ? TimeSpan.FromMinutes(10) : TimeSpan.FromMinutes(2));
         try
         {
-            var result = await ClipboardAgent.RunAsync(settings, image, text, instruction.Trim(), edit, operation.Token);
+            void Progress(string value) => app.Dispatcher.BeginInvoke(() =>
+            {
+                if (id == generation && active && finishing && !string.IsNullOrWhiteSpace(value))
+                    overlay.Render("ANSWERING", value, null);
+            });
+            var result = await ClipboardAgent.RunAsync(settings, image, text, instruction.Trim(), edit, Progress, operation.Token);
             if (id != generation) return;
             if (!ClipboardPolicy.CanWrite(clipboardVersion, Native.GetClipboardSequenceNumber()))
             {
@@ -194,15 +199,19 @@ internal static class ClipboardAgent
 {
     internal sealed record Result(string? Text, byte[]? Image);
 
-    public static async Task<Result> RunAsync(Settings settings, byte[]? image, string? text, string instruction, bool edit, CancellationToken token)
+    public static async Task<Result> RunAsync(Settings settings, byte[]? image, string? text, string instruction, bool edit, Action<string> progress, CancellationToken token)
     {
         string directory = Path.Combine(Path.GetTempPath(), "hold-to-dictate-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
+        Process? process = null;
+        bool cleanupTransferred = false;
         try
         {
             string kind = image is null ? "text" : edit ? "edit" : "analyze";
             string template = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "clipboard-agent", kind + ".txt"), token);
-            string prompt = template + "\n" + JsonSerializer.Serialize(new { instruction, text = image is null ? text : null, preferences = string.IsNullOrEmpty(settings.AgentInstructions) ? null : settings.AgentInstructions }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            bool fast = !edit && string.IsNullOrWhiteSpace(settings.CodexExecutable);
+            string payload = JsonSerializer.Serialize(new { instruction, text = image is null ? text : null, preferences = string.IsNullOrEmpty(settings.AgentInstructions) ? null : settings.AgentInstructions }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            string prompt = fast ? payload : template + "\n" + payload;
             if (image is not null) await File.WriteAllBytesAsync(Path.Combine(directory, "input.png"), image, token);
             string reply = Path.Combine(directory, "reply.txt");
             var start = new ProcessStartInfo(FindExecutable(settings.CodexExecutable))
@@ -228,14 +237,37 @@ internal static class ClipboardAgent
                 "--disable", "computer_use", edit ? "--enable" : "--disable", "image_generation", "-o", reply
             ];
             foreach (string arg in args) start.ArgumentList.Add(arg);
+            if (fast)
+            {
+                string instructionsFile = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "clipboard-agent", kind + ".txt"));
+                foreach (string arg in new[] { "--enable", "skip_host_skill_discovery", "--disable", "tool_suggest",
+                    "-c", "analytics.enabled=false", "-c", "skills.include_instructions=false", "-c", "include_apps_instructions=false",
+                    "-c", "include_environment_context=false", "-c", "include_collaboration_mode_instructions=false",
+                    "-c", "model_instructions_file=" + JsonSerializer.Serialize(instructionsFile) }) start.ArgumentList.Add(arg);
+            }
             if (image is not null) { start.ArgumentList.Add("-i"); start.ArgumentList.Add(Path.Combine(directory, "input.png")); }
             start.ArgumentList.Add("-");
-            using var process = Process.Start(start) ?? throw new IOException("Codex did not start.");
-            using var cancel = token.Register(() => { try { process.Kill(entireProcessTree: true); } catch { } });
-            var stdout = ReadEventsAsync(process.StandardOutput, token);
+            process = Process.Start(start) ?? throw new IOException("Codex did not start.");
+            using var cancel = token.Register(() => CliProcess.Kill(process));
+            var terminal = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (!fast) _ = terminal.Task.ContinueWith(t => { _ = t.Exception; }, TaskContinuationOptions.OnlyOnFaulted);
+            var stdout = ReadEventsAsync(process.StandardOutput, edit ? null : progress, terminal, token);
             var stderr = DrainAsync(process.StandardError, token);
             await process.StandardInput.WriteAsync(prompt.AsMemory(), token); process.StandardInput.Close();
-            await process.WaitForExitAsync(token); await Task.WhenAll(stdout, stderr);
+            var exit = process.WaitForExitAsync(token);
+            if (fast)
+            {
+                Task first = await Task.WhenAny(terminal.Task, exit);
+                if (first == terminal.Task)
+                {
+                    string completedAnswer = await terminal.Task;
+                    token.ThrowIfCancellationRequested();
+                    cleanupTransferred = true;
+                    _ = CliProcess.ReapAsync(process, directory, stdout, stderr, TimeSpan.FromSeconds(15));
+                    return new(completedAnswer, null);
+                }
+            }
+            await exit; await Task.WhenAll(stdout, stderr);
             if (process.ExitCode != 0) throw new IOException("Codex failed.");
             if (edit)
             {
@@ -250,29 +282,54 @@ internal static class ClipboardAgent
                     throw new IOException("Invalid image result.");
                 return new(null, bytes);
             }
+            if (fast)
+            {
+                string completedAnswer = await terminal.Task;
+                return new(completedAnswer, null);
+            }
             string answer = await File.ReadAllTextAsync(reply, token);
             if (string.IsNullOrWhiteSpace(answer)) throw new IOException("Empty reply.");
             return new(answer, null);
         }
-        finally { try { Directory.Delete(directory, recursive: true); } catch { } }
+        finally
+        {
+            if (!cleanupTransferred)
+            {
+                if (process is not null)
+                {
+                    CliProcess.Kill(process);
+                    _ = CliProcess.ReapAsync(process, directory, Task.CompletedTask, Task.CompletedTask, TimeSpan.FromSeconds(3));
+                }
+                else try { Directory.Delete(directory, recursive: true); } catch { }
+            }
+        }
     }
 
-    private static async Task<string?> ReadEventsAsync(StreamReader reader, CancellationToken token)
+    private static async Task<string?> ReadEventsAsync(StreamReader reader, Action<string>? progress, TaskCompletionSource<string> terminal, CancellationToken token)
     {
         var line = new System.Text.StringBuilder();
         var buffer = new char[4096];
         string? thread = null;
         int count;
+        bool overflow = false;
+        var turn = new CliTurn();
         while ((count = await reader.ReadAsync(buffer.AsMemory(), token)) != 0)
             for (int i = 0; i < count; i++)
             {
                 if (buffer[i] == '\n')
                 {
-                    if (thread is null) thread = ClipboardPolicy.ThreadId(line.ToString());
-                    line.Clear();
+                    if (!overflow)
+                    {
+                        string json = line.ToString();
+                        if (thread is null) thread = ClipboardPolicy.ThreadId(json);
+                        turn.Feed(json, progress, terminal);
+                    }
+                    line.Clear(); overflow = false;
                 }
-                else if (line.Length < 16384) line.Append(buffer[i]);
+                else if (line.Length < 2_097_152) line.Append(buffer[i]);
+                else overflow = true;
             }
+        terminal.TrySetException(new IOException("Codex ended without a completed answer."));
         return thread;
     }
 
