@@ -1,7 +1,7 @@
 <div align="center">
   <h1><img src="docs/hero.svg" width="864" alt="Hold to Dictate" /></h1>
   <p><strong>Hold a shortcut. Say it. Release to paste.</strong></p>
-  <p>Push-to-talk dictation that puts your words in the app you were already using.</p>
+  <p>Dictate into the current app, or give a voice instruction to text and images on your clipboard.</p>
   <p>
     <a href="https://github.com/slpkbt/hold-to-dictate/actions/workflows/macos.yml"><img src="https://github.com/slpkbt/hold-to-dictate/actions/workflows/macos.yml/badge.svg" alt="macOS build" /></a>
     <a href="https://github.com/slpkbt/hold-to-dictate/actions/workflows/windows.yml"><img src="https://github.com/slpkbt/hold-to-dictate/actions/workflows/windows.yml/badge.svg" alt="Windows build" /></a>
@@ -9,6 +9,8 @@
   </p>
   <p>
     <a href="#get-started"><strong>Get started</strong></a>
+    &nbsp;·&nbsp;
+    <a href="#clipboard-actions"><strong>Clipboard actions</strong></a>
     &nbsp;·&nbsp;
     <a href="#speech-engines"><strong>Speech engines</strong></a>
     &nbsp;·&nbsp;
@@ -31,7 +33,30 @@
   <br /><sub>The macOS overlay. The banner above is an illustration.</sub>
 </p>
 
-**No text is sent for you.** Hold to Dictate does not press Enter. Audio recordings and transcript history are not written to disk by the app. The finished text remains in your system clipboard.
+## Clipboard actions
+
+Copy some text or an image. Use **⌘⇧L** on Mac or **Ctrl+Shift+L** on Windows.
+
+| Clipboard | Gesture | Try saying | What gets copied |
+| --- | --- | --- | --- |
+| Text | Hold, speak, release | “Translate this into English” | The translation, ready to paste |
+| Text | Hold, speak, release | “How many dates are mentioned?” | The answer |
+| Image | Hold to ask, or tap once to keep recording | “Read the total on this receipt” | A text answer |
+| Image | Tap twice quickly | “Give the cat a moustache” | The edited image |
+
+<p align="center"><img src="docs/clipboard-edit.png" width="760" alt="The Mac overlay with a red circle and the spoken edit, followed by the blue circle returned by Codex" /></p>
+
+After a short tap or double tap, speak and press the shortcut again to finish. You can also hold the second press and release to submit an edit. The overlay shows the source image, microphone activity, processing and the result. Files copied in Finder or Explorer, including documents and archives, are ignored. To work with a photo, copy the image itself from a viewer or take a screenshot to the clipboard.
+
+**Setup.** Clipboard actions use Codex for both voice recognition and processing, including when regular dictation uses on-device speech. Sign in with ChatGPT in Codex and use a recent native Codex CLI (tested with 0.169.1). Image editing also needs image generation enabled for your account. The default agent is `gpt-6-luna` with `low` reasoning effort.
+
+On Mac, change `clipboardAction.model`, `effort`, `executable` or `shortcut` in the [settings file](Resources/settings.json). On Windows, open **Settings…** to select the clipboard agent model, reasoning effort and native Codex executable. The executable override is a path to the binary. Optional clipboard instructions (`clipboardAction.instructions` on Mac) can set preferences such as “Use British spelling in translations.”
+
+Text actions and image questions use a compact Codex CLI prompt. As soon as Codex confirms the turn is complete, the app copies the answer. On Mac, large image previews can be prepared while you speak. Edits use the full-resolution source.
+
+On Mac, set `clipboardAction.serviceTier` to `"priority"` to request Codex Fast mode for questions and text actions. This can consume your Codex allowance faster. Omit the setting for the default service tier.
+
+**Data.** Pressing the clipboard shortcut starts voice capture for a supported item. On submission the app sends the instruction and that item to Codex. Temporary action files are removed after each run. Codex can retain edited images under `$CODEX_HOME/generated_images`. The result is copied without pasting into another app. Copying something new while the agent works preserves the newer clipboard contents.
 
 ## Get started
 

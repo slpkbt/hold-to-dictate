@@ -14,5 +14,13 @@
     "verticalOffset": 68,
     "horizontalOffset": 0,
     "reduceMotion": false
+  },
+  "clipboardAction": {
+    "shortcut": "cmd+shift+l",
+    "model": "gpt-6-luna",
+    "effort": "low",
+    "executable": null,
+    "instructions": "",
+    "serviceTier": null
   }
 }
