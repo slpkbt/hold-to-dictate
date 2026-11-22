@@ -16,6 +16,7 @@ struct Settings: Decodable {
         let model: String
         let effort: String
         let executable: String?
+        var instructions: String? = nil
     }
 
     enum Engine: String, Decodable { case codex, onDevice }

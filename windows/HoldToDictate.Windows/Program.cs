@@ -17,7 +17,15 @@ internal static class Program
                 var overlay = new Overlay(new());
                 overlay.SetLevel(20);
                 overlay.Close();
+                var pixel = System.Windows.Media.Imaging.BitmapSource.Create(1, 1, 96, 96,
+                    System.Windows.Media.PixelFormats.Bgra32, null, new byte[] { 0, 0, 255, 255 }, 4);
+                var source = new DataObject();
+                source.SetImage(pixel);
+                var png = ClipboardImage.Read(source);
+                if (png is null || ClipboardImage.Read(ClipboardImage.ForCopy(png)) is not { } copy
+                    || !copy.SequenceEqual(png)) return 1;
                 var centered = new Overlay(new(), centered: true);
+                centered.SetPreview(png);
                 centered.Render("PREVIEW", "Preview", 0);
                 centered.HideAnimated();
                 centered.Close();

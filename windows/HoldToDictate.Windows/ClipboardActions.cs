@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Windows;
-using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 
 namespace HoldToDictate.WindowsApp;
@@ -76,20 +75,13 @@ internal sealed class ClipboardActions : IDisposable
             var data = Clipboard.GetDataObject();
             if (data is null || data.GetDataPresent(DataFormats.FileDrop) || data.GetDataPresent("FileGroupDescriptor")
                 || data.GetDataPresent("FileGroupDescriptorW")) return;
-            image = null; text = null;
-            if (data.GetDataPresent(DataFormats.Bitmap))
-            {
-                var bitmap = data.GetData(DataFormats.Bitmap) as BitmapSource;
-                if (bitmap is null) return;
-                var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                using var stream = new MemoryStream(); encoder.Save(stream); image = stream.ToArray();
-            }
-            else if (data.GetDataPresent(DataFormats.UnicodeText) || data.GetDataPresent(DataFormats.Text))
+            image = ClipboardImage.Read(data);
+            text = null;
+            if (image is null)
             {
                 text = (data.GetData(DataFormats.UnicodeText) ?? data.GetData(DataFormats.Text)) as string;
                 if (string.IsNullOrWhiteSpace(text)) return;
             }
-            else return;
             if (!ClipboardPolicy.CanWrite(clipboardVersion, Native.GetClipboardSequenceNumber())) return;
             int id = ++generation;
             active = true; finishing = latched = secondPress = edit = false; pressed = DateTime.UtcNow;
@@ -157,10 +149,7 @@ internal sealed class ClipboardActions : IDisposable
             }
             if (result.Image is not null)
             {
-                using var stream = new MemoryStream(result.Image);
-                var bitmap = new BitmapImage(); bitmap.BeginInit(); bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.StreamSource = stream; bitmap.EndInit(); bitmap.Freeze();
-                Clipboard.SetImage(bitmap);
+                Clipboard.SetDataObject(ClipboardImage.ForCopy(result.Image), copy: true);
                 overlay.SetPreview(result.Image);
             }
             else Clipboard.SetText(result.Text!);
@@ -213,7 +202,7 @@ internal static class ClipboardAgent
         {
             string kind = image is null ? "text" : edit ? "edit" : "analyze";
             string template = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "clipboard-agent", kind + ".txt"), token);
-            string prompt = template + "\n" + JsonSerializer.Serialize(new { instruction, text = image is null ? text : null }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+            string prompt = template + "\n" + JsonSerializer.Serialize(new { instruction, text = image is null ? text : null, preferences = string.IsNullOrEmpty(settings.AgentInstructions) ? null : settings.AgentInstructions }, new JsonSerializerOptions { DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
             if (image is not null) await File.WriteAllBytesAsync(Path.Combine(directory, "input.png"), image, token);
             string reply = Path.Combine(directory, "reply.txt");
             var start = new ProcessStartInfo(FindExecutable(settings.CodexExecutable))

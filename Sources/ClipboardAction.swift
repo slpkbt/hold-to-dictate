@@ -92,6 +92,9 @@ enum ClipboardAgent {
               let template = try? String(contentsOf: resource, encoding: .utf8) else {
             throw DictationError("Не найден шаблон действия с буфером обмена.")
         }
+        if let preferences = settings.instructions, !preferences.isEmpty {
+            input["preferences"] = preferences
+        }
         let json = try JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])
         let prompt = template + "\n" + String(decoding: json, as: UTF8.self)
         let environment = try invoke(prompt: prompt, payload: payload, kind: kind, settings: settings, directory: directory)

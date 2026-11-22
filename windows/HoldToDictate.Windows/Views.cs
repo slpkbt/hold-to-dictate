@@ -155,7 +155,7 @@ internal sealed class SettingsWindow : Window
 {
     private const string LoginKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string LoginName = "HoldToDictate";
-    private readonly TextBox shortcut, accent, width, agentModel, codexExecutable;
+    private readonly TextBox shortcut, accent, width, agentModel, agentInstructions, codexExecutable;
     private readonly ComboBox agentEffort;
     private readonly ComboBox engine, language;
     private readonly CheckBox paste, sound, login;
@@ -179,6 +179,7 @@ internal sealed class SettingsWindow : Window
         try { languages = LocalRecognition.Languages(); }
         catch { languages = []; }
         language = new ComboBox { ItemsSource = new[] { "" }.Concat(languages).ToArray(), IsEditable = true, Text = current.Language };
+        agentInstructions = new TextBox { Text = current.AgentInstructions, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
         agentModel = new TextBox { Text = current.AgentModel };
         codexExecutable = new TextBox { Text = current.CodexExecutable };
         agentEffort = new ComboBox { ItemsSource = new[] { "minimal", "low", "medium", "high", "xhigh", "max" }, SelectedItem = current.AgentReasoningEffort };
@@ -205,6 +206,7 @@ internal sealed class SettingsWindow : Window
         Field("Windows Speech language (blank = automatic)", language);
         Field("Clipboard agent model", agentModel);
         Field("Clipboard agent reasoning effort", agentEffort);
+        Field("Clipboard instructions (optional)", agentInstructions);
         Field("Codex executable path (blank = automatic)", codexExecutable);
         Field("Overlay accent (#RRGGBB)", accent);
         Field("Overlay width (320–780)", width);
@@ -246,7 +248,7 @@ internal sealed class SettingsWindow : Window
                 {
                     Shortcut = shortcut.Text.Trim(), Engine = engine.SelectedIndex == 1 ? "codex" : "onDevice",
                     AgentModel = agentModel.Text.Trim(), AgentReasoningEffort = (string)agentEffort.SelectedItem,
-                    CodexExecutable = codexExecutable.Text.Trim(),
+                    CodexExecutable = codexExecutable.Text.Trim(), AgentInstructions = agentInstructions.Text,
                     Language = language.Text.Trim(), Accent = accent.Text.Trim(), OverlayWidth = parsedWidth,
                     PasteAutomatically = paste.IsChecked == true, PlaySound = sound.IsChecked == true,
                     StartAtLogin = login.IsChecked == true

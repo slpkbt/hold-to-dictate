@@ -19,6 +19,7 @@
     "shortcut": "cmd+shift+l",
     "model": "gpt-6-luna",
     "effort": "low",
-    "executable": null
+    "executable": null,
+    "instructions": ""
   }
 }

@@ -98,6 +98,12 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let title = NSMenuItem(title: "Диктовка · \(shortcut)", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
+        if let action = settings?.clipboardAction {
+            let keys = action.shortcut.uppercased().replacingOccurrences(of: "+", with: " + ")
+            let item = NSMenuItem(title: "Буфер обмена · " + keys, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
         menu.addItem(.separator())
         add("Открыть настройки", #selector(openSettings), to: menu)
         add("Применить настройки", #selector(reload), to: menu)
@@ -363,11 +369,11 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch action {
         case .edit:
             actionEdit = true
-            overlay.status("Редактирование изображения · Слушаю…")
+            overlay.status("Опишите правку изображения")
         case .finish: finishAction()
         case .some(.none):
             if !pressed, case .image = actionPayload {
-                overlay.status("Запись идёт · Нажмите ещё раз для завершения")
+                overlay.status(actionEdit ? "Правка · Нажмите ещё раз для завершения" : "Вопрос · Нажмите ещё раз для завершения")
             }
         default: break
         }
@@ -399,10 +405,11 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if case .image(let bytes) = actionPayload {
                 overlay.show(image: NSImage(data: bytes), clipboard: true)
+                overlay.status("Задайте вопрос об изображении")
             } else {
                 overlay.show(clipboard: true)
+                overlay.status("Что сделать с текстом?")
             }
-            overlay.status("Инструкция · Слушаю…")
             if settings?.playSound == true { playSound(named: settings?.startSound ?? "Tink") }
             limit = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(240))
@@ -444,7 +451,7 @@ final class DictationApp: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let edit = actionEdit
             let count = actionClipboardCount
-            overlay.status("Обрабатываю…", text: instruction, processing: true)
+            overlay.status(edit ? "Редактирую изображение…" : "Готовлю ответ…", text: instruction, processing: true)
             Task { [weak self] in
                 let result = await Task.detached {
                     Result { try ClipboardAgent.run(payload: payload, instruction: instruction, edit: edit, settings: settings.clipboardAction) }

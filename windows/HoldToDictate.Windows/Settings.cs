@@ -7,6 +7,7 @@ internal sealed record Settings
 {
     public string Shortcut { get; init; } = "ctrl+shift+k";
     public string Engine { get; init; } = "onDevice";
+    public string AgentInstructions { get; init; } = "";
     public string AgentModel { get; init; } = "gpt-6-luna";
     public string AgentReasoningEffort { get; init; } = "low";
     public string CodexExecutable { get; init; } = "";

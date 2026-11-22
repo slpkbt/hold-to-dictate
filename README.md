@@ -44,11 +44,13 @@ Copy some text or an image. Use **⌘⇧L** on Mac or **Ctrl+Shift+L** on Window
 | Image | Hold to ask, or tap once to keep recording | “Read the total on this receipt” | A text answer |
 | Image | Tap twice quickly | “Give the cat a moustache” | The edited image |
 
+<p align="center"><img src="docs/clipboard-edit.png" width="760" alt="The Mac overlay with a red circle and the spoken edit, followed by the blue circle returned by Codex" /></p>
+
 After a short tap or double tap, speak and press the shortcut again to finish. You can also hold the second press and release to submit an edit. The overlay shows the source image, microphone activity, processing and the result. Files copied in Finder or Explorer, including documents and archives, are ignored. To work with a photo, copy the image itself from a viewer or take a screenshot to the clipboard.
 
 **Setup.** Clipboard actions use Codex for both voice recognition and processing, including when regular dictation uses on-device speech. Sign in with ChatGPT in Codex and use a recent native Codex CLI (tested with 0.169.1). Image editing also needs image generation enabled for your account. The default agent is `gpt-6-luna` with `low` reasoning effort.
 
-On Mac, change `clipboardAction.model`, `effort`, `executable` or `shortcut` in the [settings file](Resources/settings.json). On Windows, open **Settings…** to select the clipboard agent model, reasoning effort and native Codex executable. The executable override is a path to the binary.
+On Mac, change `clipboardAction.model`, `effort`, `executable` or `shortcut` in the [settings file](Resources/settings.json). On Windows, open **Settings…** to select the clipboard agent model, reasoning effort and native Codex executable. The executable override is a path to the binary. Optional clipboard instructions (`clipboardAction.instructions` on Mac) can set preferences such as “Use British spelling in translations.”
 
 **Data.** Pressing the clipboard shortcut starts voice capture for a supported item. On submission the app sends the instruction and that item to Codex. Temporary action files are removed after each run. Codex can retain edited images under `$CODEX_HOME/generated_images`. The result is copied without pasting into another app. Copying something new while the agent works preserves the newer clipboard contents.
 
